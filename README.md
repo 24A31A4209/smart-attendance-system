@@ -19,3 +19,7 @@ This system utilizes the **InsightFace** library with the following architecture
 - **Database:** SQLite
 - **Computer Vision:** OpenCV, InsightFace
 
+## 👥 Contributors
+- **Hima Bindu Guru** (@24A31A4209) - Lead Developer / AI Integration
+- **Piradi Sai Rupa Sri** (@24A31A4227) - Backend/Database
+- **Jampa Siri Chandana Priya** (@24A314210) - UI/UX Design
