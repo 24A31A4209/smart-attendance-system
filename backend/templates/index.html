@@ -329,6 +329,8 @@
     currentLiveBS = prompt("Enter Branch_Section:");
     if (!currentLiveBS) return;
 
+    await fetch(`/start_live_session/${currentLiveBS}`);
+
     const overlay = document.getElementById('liveOverlay');
     overlay.style.display = 'flex';
     

@@ -238,7 +238,7 @@ def analyze_frame():
             # Recognition Logic
             for roll, vec in known_faces.items():
                 sim = np.dot(face.normed_embedding, vec)
-                if sim > 0.45: # Threshold
+                if sim > 0.35: # Threshold
                     if sim > max_sim:
                         max_sim = sim
                         best_roll = roll
@@ -247,8 +247,8 @@ def analyze_frame():
                 active_session["present"].add(best_roll)
             
             # Send BBOX as list for JSON compatibility
-                bbox = [int(x) for x in face.bbox.tolist()]
-                results.append({"name": best_roll, "bbox": bbox})
+            bbox = [int(x) for x in face.bbox.tolist()]
+            results.append({"name": best_roll, "bbox": bbox})
         return jsonify({"success": True, "results": results})
     except Exception as e:
         print(f"Error: {e}") # Log error to console for debugging
