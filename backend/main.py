@@ -3,14 +3,15 @@ import cv2
 import numpy as np
 import base64
 import csv
+import sqlite3
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify, Response, send_file
+from flask import Flask, render_template, request, jsonify, Response, send_file, redirect, url_for, session, flash
 from insightface.app import FaceAnalysis
-# --- NEW DATABASE IMPORTS ---
-from data import init_db, save_student_face, get_known_faces, save_daily_attendance # Added save_daily_attendance
-import sqlite3 # Needed for the history query
+from data import init_db, save_student_face, get_known_faces, save_daily_attendance, DB_PATH
 
 app = Flask(__name__)
+app.secret_key = '65de29cb8a5bf78e89e9bb840287cb60bf01e312b87eef590ada2aadc3fe4826'  # Required for session to work!
+
 
 # --- PATH LOGIC ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) 
@@ -254,6 +255,26 @@ def analyze_frame():
         print(f"Error: {e}") # Log error to console for debugging
         return jsonify({"success": False, "error": str(e)})
 
+#=========== live data ===#
+@app.route('/get_session_status')
+def get_session_status():
+    branch = request.args.get('branch')
+    # Get total class strength
+    known_faces = get_known_faces(branch)
+    total_strength = len(known_faces)
+    
+    # Calculate progress
+    marked = list(active_session["present"])
+    present_count = len(marked)
+    progress = (present_count / total_strength * 100) if total_strength > 0 else 0
+    
+    return jsonify({
+        "marked": marked,
+        "count": present_count,
+        "total": total_strength,
+        "percentage": round(progress, 1)
+    })
+#======== stopping session and saving history==========#
 @app.route('/stop_live_session/<bs>')
 def stop_live_session(bs):
     active_session["is_running"] = False
@@ -275,25 +296,67 @@ def stop_live_session(bs):
 def history():
     selected_branch = request.args.get('branch')
     selected_date = request.args.get('date', datetime.now().strftime("%Y-%m-%d"))
+    view_mode = request.args.get('view') 
+    
     history_records = []
+    monthly_stats = []
+    corrections = []  # Added this list
+    
+    from data import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
 
-    if selected_branch and selected_date:
-        # Connect to DB to fetch the requested records
-        from data import DB_PATH
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT roll_no, status FROM attendance_history 
-            WHERE branch_section = ? AND date = ? 
-            ORDER BY roll_no ASC
-        ''', (selected_branch, selected_date))
-        history_records = cursor.fetchall()
-        conn.close()
+    if selected_branch:
+        # A. Logic for DAILY REPORT
+        if not view_mode: 
+            cursor.execute('''
+                SELECT roll_no, status FROM attendance_history 
+                WHERE branch_section = ? AND date = ? 
+                ORDER BY roll_no ASC
+            ''', (selected_branch, selected_date))
+            history_records = cursor.fetchall()
+
+            # NEW: Fetch corrections for this specific date
+            cursor.execute('''
+                SELECT roll_no, old_status, new_status, modified_by 
+                FROM attendance_corrections 
+                WHERE date = ? ORDER BY modified_time DESC
+            ''', (selected_date,))
+            corrections = cursor.fetchall()
+
+        # B. Logic for MONTHLY ANALYTICS
+        elif view_mode == 'analytics':
+            selected_month = request.args.get('month', datetime.now().strftime("%Y-%m"))
+            cursor.execute('''
+                SELECT roll_no, 
+                       (SUM(CASE WHEN status = 'PRESENT' THEN 1 ELSE 0 END) * 100.0 / COUNT(*)) as percentage
+                FROM attendance_history 
+                WHERE branch_section = ? AND date LIKE ?
+                GROUP BY roll_no
+                ORDER BY percentage DESC
+            ''', (selected_branch, f"{selected_month}%"))
+            
+            for row in cursor.fetchall():
+                percentage = round(row[1], 2)
+                if percentage >= 75: status = "Good"
+                elif percentage >= 40: status = "Needs Attention"
+                else: status = "Poor"
+                
+                monthly_stats.append({
+                    "roll_no": row[0], 
+                    "percentage": percentage, 
+                    "status": status
+                })
+            
+    conn.close()
 
     return render_template('history.html', 
                            history=history_records, 
+                           corrections=corrections, # Pass this to the HTML
+                           monthly_stats=monthly_stats,
                            selected_branch=selected_branch, 
-                           selected_date=selected_date)
+                           selected_date=selected_date,
+                           view_mode=view_mode)
 
 #=========== EXPORT HISTORY AS CSV (NEW) ============
 
@@ -331,6 +394,47 @@ def export_history_csv():
             writer.writerow([roll, status])
 
     return send_file(filepath, as_attachment=True)
+
+#=========== UPDATE ATTENDANCE ============
+
+@app.route('/update_attendance', methods=['POST'])
+def update_attendance():
+    date = request.form.get('date')
+    branch = request.form.get('branch')
+    faculty_name = session.get('user_name', 'Admin') 
+    
+    # 1. Use 'timeout=10' to wait if the DB is busy
+    # 2. Use 'with' to ensure it closes automatically
+    try:
+        with sqlite3.connect(DB_PATH, timeout=10) as conn:
+            cursor = conn.cursor()
+
+            for key, new_status in request.form.items():
+                if key.startswith('status_'):
+                    roll_no = key.split('_')[1]
+                    
+                    cursor.execute("SELECT status FROM attendance_history WHERE roll_no = ? AND date = ? AND branch_section = ?", 
+                                   (roll_no, date, branch))
+                    result = cursor.fetchone()
+                    
+                    if result:
+                        old_status = result[0]
+                        if old_status != new_status:
+                            cursor.execute('''UPDATE attendance_history 
+                                              SET status = ? 
+                                              WHERE roll_no = ? AND date = ? AND branch_section = ?''', 
+                                           (new_status, roll_no, date, branch))
+                            
+                            cursor.execute('''INSERT INTO attendance_corrections 
+                                              (roll_no, date, old_status, new_status, modified_by) 
+                                              VALUES (?, ?, ?, ?, ?)''', 
+                                           (roll_no, date, old_status, new_status, faculty_name))
+            conn.commit()
+    except sqlite3.OperationalError as e:
+        print(f"Database busy, retrying: {e}")
+        return "Database is busy, please try again in a moment.", 503
+        
+    return redirect(url_for('history', branch=branch, date=date))
 
 if __name__ == '__main__':
     init_db() # Initializes the SQLite Database
